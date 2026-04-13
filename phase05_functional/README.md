@@ -652,3 +652,85 @@ mystl::sort(v.begin(), v.end(), mystl::greater<int>{});
 - 仿函数通过 **类型别名**（`argument_type` 等）向适配器暴露自己的接口信息
 - 适配器通过**读取这些别名**在编译期推导自身的类型签名，形成可组合的类型安全的函数组合链
 - C++11 的 lambda 从根本上解决了这套体系的复杂性问题，但理解旧体系是掌握现代 C++ 的重要一步
+
+---
+
+## 复杂度分析表
+
+| 组件 | 调用开销 | 编译期开销 | 备注 |
+|------|---------|-----------|------|
+| plus/minus 等算术仿函数 | O(1) | 零 | 等价于内联运算符 |
+| less/greater 等比较仿函数 | O(1) | 零 | 等价于 </> |
+| not1(pred)(x) | O(1) | 一层包装 | 编译器通常完全内联 |
+| not2(pred)(x,y) | O(1) | 一层包装 | 同上 |
+| bind2nd(op,val)(x) | O(1) | 一层包装 | 每次调用固定第二参数 |
+| bind1st(op,val)(x) | O(1) | 一层包装 | 每次调用固定第一参数 |
+| ptr_fun(f)(x) | O(1) | 一层包装 | 包装函数指针，无虚调用 |
+| not1(ptr_fun(f))(x) | O(1) | 两层包装 | 两次 operator() 调用，均可内联 |
+
+注：所有仿函数和适配器均为 `const` 成员函数 + 值语义，编译器能充分内联优化。
+
+---
+
+## 代码走读：not1(ptr_fun(is_positive)) 展开过程
+
+逐步追踪类型链的展开：
+
+```
+1. is_positive 是 bool(*)(int)，没有 argument_type
+
+2. ptr_fun(is_positive)
+   → pointer_to_unary_function<int, bool>
+   → 有 argument_type = int, result_type = bool
+   → operator()(int x) { return is_positive(x); }
+
+3. not1(ptr_fun(is_positive))
+   → unary_negate<pointer_to_unary_function<int,bool>>
+   → 继承自 unary_function<int, bool>
+   → operator()(int x) { return !pred_(x); }
+                              = !is_positive(x)
+
+4. find_if(arr, arr+4, not_positive)
+   → 对每个元素调用 not_positive(*it)
+   → 展开为 !is_positive(*it)
+   → 找第一个非正数
+```
+
+对比直接用裸函数指针为何失败：
+
+```
+not1(is_positive)
+  → unary_negate<bool(*)(int)>
+  → typename Predicate::argument_type  ← 编译错误！
+     函数指针类型没有 ::argument_type
+```
+
+因此必须先经过 `ptr_fun` 包装，才能为适配器提供所需的类型别名。
+
+---
+
+## 实现难点 & 踩坑记录
+
+1. **not1 要求 argument_type**：`unary_negate<Pred>` 在声明时就萃取 `Pred::argument_type`，如果 `Pred` 是普通函数或没有继承 `unary_function` 的仿函数，直接编译报错。必须用 `ptr_fun` 包装或继承 `unary_function`。
+
+2. **bind1st/bind2nd 要求完整的三个类型别名**：需要 `first_argument_type`、`second_argument_type`、`result_type` 三者都有。缺少任何一个都会导致编译失败。
+
+3. **mystl::less 和 std::less 的 first_argument_type**：C++17 中 `std::less` 移除了这些 typedef（改用透明比较符），所以 `bind2nd(std::less<int>{}, 5)` 在 C++17 中编译失败。本实现用自定义 `mystl::less` 保留了这些 typedef。
+
+4. **not2 的类型转发**：`binary_negate::operator()` 的参数类型必须精确匹配 `Predicate::first/second_argument_type`，如果谓词用 `const T&` 而适配器用 `T`，会发生隐式拷贝，但仍能工作；类型不兼容时则报错。
+
+---
+
+## 与 std 的对比和差异
+
+| C++98 mystl | std 等价（C++11+） | C++17 状态 | 说明 |
+|------------|-----------------|-----------|------|
+| not1(pred) | !pred(x) lambda 或 std::not_fn(pred) | 弃用 not1 | std::not_fn 不要求 argument_type |
+| not2(pred) | std::not_fn(pred) | 弃用 not2 | 同上 |
+| bind1st(f,v) | [v](auto x){return f(v,x);} 或 std::bind(f,v,_1) | 弃用 bind1st | std::bind 不要求类型别名 |
+| bind2nd(f,v) | [v](auto x){return f(x,v);} 或 std::bind(f,_1,v) | 弃用 bind2nd | 同上 |
+| ptr_fun(f) | 直接用 f（lambda 可包装） | 弃用 ptr_fun | C++11 lambda 解决了所有场景 |
+| unary_function | 无直接替代 | 弃用 | C++20 用 concepts |
+| binary_function | 无直接替代 | 弃用 | C++20 用 concepts |
+
+本实现忠实还原 C++98/03 风格，是理解 STL 历史演化的最好切入点。现代 C++ 已用 lambda + std::bind + std::not_fn + concepts 彻底替代了这套体系。

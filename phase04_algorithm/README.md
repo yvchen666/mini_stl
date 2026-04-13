@@ -682,6 +682,104 @@ cmake .. && make
 
 ---
 
+## 复杂度分析表
+
+| 算法 | 时间复杂度 | 空间复杂度 | 稳定性 | 备注 |
+|------|-----------|----------|--------|------|
+| find/find_if | O(n) | O(1) | 稳定 | 线性扫描 |
+| copy (trivial) | O(n) | O(1) | 稳定 | memmove 实现 |
+| copy (non-trivial) | O(n) | O(1) | 稳定 | 逐元素赋值 |
+| fill | O(n) | O(1) | - | char 特化用 memset |
+| reverse | O(n) | O(1) | 不稳定 | 双指针对调 |
+| sort (average) | O(n log n) | O(log n) | 不稳定 | introsort |
+| sort (worst) | O(n log n) | O(log n) | 不稳定 | 堆排保底 |
+| merge | O(n+m) | O(1) | 稳定 | 需要输出迭代器 |
+| inplace_merge | O(n) | O(n/2) | 稳定 | 需要左半缓冲区 |
+| lower_bound/upper_bound | O(log n) | O(1) | - | 要求有序 |
+| binary_search | O(log n) | O(1) | - | 内部调 lower_bound |
+| next_permutation | O(n) | O(1) | - | 四步法 |
+| count/count_if | O(n) | O(1) | - | 线性扫描 |
+
+---
+
+## 代码走读：introsort 分区过程图解
+
+以小数组 `[5, 3, 8, 1, 7]`（size=5）为例逐步追踪：
+
+```
+初始: [5, 3, 8, 1, 7]
+depth_limit = 2*floor(log2(5)) = 4
+
+Step 1: size=5 > THRESHOLD(16)? 否，直接插入排序
+  → 等等，size=5 < 16，introsort 退出，insertion_sort 做最终通扫
+
+再换更大例子：[5, 3, 8, 1, 7, 2, 4, 6]  (size=8)
+Step 1: size=8 < 16 → introsort 直接返回，insertion_sort 通扫
+```
+
+换用 20 个元素的例子，展示 pivot 选取过程：
+
+```
+median_of_three(first=arr[0], mid=arr[10], last-1=arr[19], comp)
+  *arr[0]=15, *arr[10]=7, *arr[19]=3
+  comp(15,7)=false, comp(15,3)=false, comp(7,3)=false → return arr[19] (3)
+  → pivot=3
+```
+
+选出 pivot=3 后执行 `iter_swap(pivot, last-1)`，将 3 放到末尾，然后进入分区循环：
+
+```
+分区前: [..., 3]   pivot 在 last-1 位置
+  p = first, q = last-2
+
+  内层循环：
+    p 向右扫，直到 *p >= pivot(3)
+    q 向左扫，直到 *q < pivot(3)
+    若 p < q，swap(*p, *q)，继续
+    若 p >= q，退出
+
+  最后：iter_swap(p, last-1)  → pivot 归位到 p 处
+  左半 [first, p) 全 < pivot，右半 (p, last) 全 >= pivot
+```
+
+递归只对右半（较小分区）调用 introsort，左半用尾递归循环处理，栈深度始终为 O(log n)。
+
+---
+
+## 实现难点 & 踩坑记录
+
+1. **inplace_merge 双重读取 bug**：原地归并时，left 指针 `f` 和 right 指针 `m` 共享内存。当我们把 `*m` 写入 `out` 位置后，`out` 推进覆盖了原来 `f` 指向的数据。具体场景：
+   ```
+   arr: [1, 3, 5, | 2, 4, 6]  分界在 arr+3
+   out=arr+0, f=arr+0, m=arr+3
+   比较 *f(1) vs *m(2) → 写 *f(1) 到 *out(arr[0])  — 原地没动
+   out=arr+1, f=arr+1
+   比较 *f(3) vs *m(2) → 写 *m(2) 到 *out(arr[1])  — arr[1] 从 3 变成 2
+   f=arr+1 现在读到的是已被覆盖的 2，不是原来的 3 — 数据错误！
+   ```
+   修复：先把左半段复制到 `new T[n1]` 缓冲区。
+
+2. **ADL 歧义 — inplace_merge 无参版调用有参版**：`inplace_merge(int*, int*, int*)` 内部调 `inplace_merge(int*, int*, int*, less<int>)` 时，ADL 同时找到 `mystl::` 和 `std::` 的版本。用 `::mystl::inplace_merge(...)` 显式加前缀解决。
+
+3. **sort 的插入排序"最终通扫"位置**：`insertion_sort` 必须在 `introsort` 之后对**整个范围**运行一次，而不是在每个子区间 <16 时分别运行。前者能利用 introsort 已将大元素排到后方的性质，只做少量移动。
+
+4. **median_of_three 覆盖所有 6 种排列**：三个值的相对顺序有 6 种，代码需要覆盖全部；原始实现有时遗漏等号情况（a==b 时行为未定义）。
+
+---
+
+## 与 std 的对比和差异
+
+| 功能 | mystl | std | 差异 |
+|------|-------|-----|------|
+| sort | introsort | introsort (pdqsort in libstdc++11+) | std 现代实现用 pdqsort，对近似有序更优 |
+| stable_sort | 未实现 | timsort/merge sort | mystl 缺少稳定排序 |
+| copy | memmove (trivial) | __builtin_memmove | 实现等价 |
+| inplace_merge | 左半缓冲区 O(n) 空间 | 有缓冲区用归并，无缓冲区用旋转 O(n log n) | std 能在 O(1) 空间降级 |
+| lower_bound | 仅支持 ForwardIt | 同 | 接口相同 |
+| 缺失算法 | - | transform, accumulate, for_each, remove_if, partition 等 | mystl 只实现了核心子集 |
+
+---
+
 ## 小结
 
 本阶段实现了一个完整的算法库，核心亮点如下：

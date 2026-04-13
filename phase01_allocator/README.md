@@ -190,7 +190,159 @@ mystl::destroy(first, last);
 
 ---
 
-## 九、运行测试
+## 九、复杂度分析表
+
+| 操作 | 时间复杂度 | 空间复杂度 | 备注 |
+|------|-----------|-----------|------|
+| `allocate(n≤128)` | O(1) | O(1) | freelist 头节点摘出，无系统调用 |
+| `allocate(n>128)` | O(1) 均摊 | O(n) | 直接 `malloc`，受 OS 调度影响 |
+| `deallocate(n≤128)` | O(1) | O(1) | 头插回 freelist，无系统调用 |
+| `chunk_alloc` (cold) | O(1) 均摊 | O(n) | 首次调用 `malloc` 申请大块，切分挂链 |
+| `refill` | O(1) | O(n) | 调用 `chunk_alloc` 后将多余块挂入 freelist |
+| `construct(T, args)` | O(1) | O(1) | placement new，不分配内存 |
+| `destroy(T*)` | O(1) | O(1) | 直接调用 `~T()`，不释放内存 |
+| `uninitialized_copy` (trivial type) | O(n) | O(1) | 退化为 `memmove`，常数极小 |
+| `uninitialized_copy` (non-trivial) | O(n) | O(1) | 逐元素 placement new，可能抛异常 |
+
+---
+
+## 十、代码走读（逐步图解）
+
+### allocate(13) 完整路径
+
+```
+调用 allocate(13)
+ 1. n=13 ≤ 128，进入二级分配器路径
+ 2. round_up(13) = (13+7)&~7 = 16  → 落在 free_list[1]
+ 3. free_list[1] 当前有空块：
+    free_list[1] → [16B块A] → [16B块B] → nullptr
+ 4. 摘出头节点 A：
+    p = free_list[1]               // p 指向块A
+    free_list[1] = p->free_list_link  // 链表前进到块B
+    free_list[1] → [16B块B] → nullptr
+ 5. 返回块A地址（用户可用 16 字节）
+```
+
+### deallocate(p, 13) 归还路径
+
+```
+调用 deallocate(p, 13)
+ 1. n=13 ≤ 128，进入二级分配器路径
+ 2. round_up(13) = 16 → 落在 free_list[1]
+ 3. 将 p 头插回 free_list[1]：
+    reinterpret_cast<FreeNode*>(p)->free_list_link = free_list[1]
+    free_list[1] = reinterpret_cast<FreeNode*>(p)
+    free_list[1] → [归还的块A] → [16B块B] → nullptr
+ 4. 内存不还给 OS，等待下次 allocate 直接复用
+```
+
+### chunk_alloc 当 freelist 为空时
+
+```
+初始状态：free_list[1] = nullptr，pool_start_ = pool_end_（内存池耗尽）
+
+chunk_alloc(size=16, n_obj=20) 被 refill 调用
+ 1. 计算需要字节：total = 16 * 20 = 320B
+ 2. pool_start_ == pool_end_，内存池为空
+ 3. 调用 malloc(2 * 320 + heap_size_/16) = malloc(640 + 附加量)
+    pool_start_ ──────────────────────────────────────────┐
+    pool_end_   ────────────────────────────────────── (640B后)
+                [  可用内存块 640B                        ]
+ 4. 从 pool_start_ 切出 n_obj=20 个 16B 块：
+    [块0][块1][块2]...[块19]  pool_start_ 前移 320B
+ 5. 块0 直接返回给调用者，块1~块19 由 refill 挂入 free_list[1]
+    free_list[1] → [块1] → [块2] → ... → [块19] → nullptr
+```
+
+---
+
+## 十一、实现难点 & 踩坑记录
+
+### 1. freelist_index 计算陷阱
+
+`n / ALIGN - 1` 在 `n=0` 时会发生无符号下溢（`std::size_t` 为无符号类型）：
+
+```cpp
+// 错误写法：n=0 时 0/8=0，0-1 = SIZE_MAX，越界访问 free_list_
+static std::size_t freelist_index_wrong(std::size_t n) {
+    return n / ALIGN - 1;
+}
+
+// 正确写法：先加 ALIGN-1 再除，n=0 → (0+7)/8-1 = 0 （仍需上游保证 n>0）
+static std::size_t freelist_index(std::size_t n) {
+    return (n + ALIGN - 1) / ALIGN - 1;
+}
+```
+
+实际调用点要保证 `n > 0`，或在 `allocate` 入口处对 `n==0` 特殊处理（返回 `allocate(1)`）。
+
+### 2. chunk_alloc 递归终止条件
+
+当内存池耗尽且 `malloc` 失败后，代码会遍历更大档位的 freelist 借一块救急，再**递归**调用 `chunk_alloc`。若所有 freelist 都为空，必须终止递归并抛出异常：
+
+```cpp
+// 正确：所有救急路径都走完后抛出
+throw std::bad_alloc();
+
+// 错误：忘记终止条件，导致无限递归直到栈溢出
+// return chunk_alloc(size, n_obj);  // ← 没有任何状态改变时不能递归
+```
+
+### 3. static 成员的 ODR 问题
+
+`PoolAlloc` 的 freelist 是 `static` 数据成员，在多个翻译单元中使用时必须恰好定义一次：
+
+```cpp
+// pool_alloc.h（声明）
+class PoolAlloc {
+    static FreeNode* free_list_[N_FREELISTS];
+};
+
+// pool_alloc.cpp（定义，C++14 及以前必须有这行）
+PoolAlloc::FreeNode* PoolAlloc::free_list_[PoolAlloc::N_FREELISTS] = {};
+
+// C++17 替代方案：头文件中用 inline static
+class PoolAlloc {
+    inline static FreeNode* free_list_[N_FREELISTS] = {};  // 无需 .cpp 定义
+};
+```
+
+忘记在 `.cpp` 中定义会在链接阶段报 `undefined reference`，而不是编译错误，容易排查困难。
+
+---
+
+## 十二、与 std 的对比和差异
+
+### mystl::Allocator 与 std::allocator 接口对比
+
+| 接口 | mystl::Allocator | std::allocator | 备注 |
+|------|-----------------|----------------|------|
+| `allocate(n)` | 有，≤128 走内存池 | 有，直接 `operator new` | mystl 有分配加速 |
+| `deallocate(p, n)` | 有，≤128 归还 freelist | 有，`operator delete` | mystl 不还给 OS |
+| `construct(p, args)` | 有，placement new | 有（C++17 前是成员，后移至 `std::allocator_traits`） | 语义相同 |
+| `destroy(p)` | 有，显式析构 | 有（同上） | 语义相同 |
+
+### 主要差异
+
+- **std::allocator**：现代标准库实现（libc++、libstdc++）通常直接调用 `operator new`/`operator delete`，不使用内存池，依赖 tcmalloc / jemalloc 等系统分配器的优化。
+- **mystl::PoolAlloc**：实现的是 SGI STL（1990 年代）的二级分配器，属于历史产物，目的是在没有高性能系统分配器时提速小对象分配。
+
+### mystl 缺失的 C++11 Allocator 要求
+
+```cpp
+// 以下 traits 在 mystl 中未实现：
+allocator_traits<A>::rebind_alloc<U>          // 容器内部节点类型转换
+allocator_traits<A>::max_size(a)              // 最大可分配大小
+allocator_traits<A>::propagate_on_container_copy_assignment  // 拷贝时是否传播
+allocator_traits<A>::propagate_on_container_move_assignment  // 移动时是否传播
+allocator_traits<A>::is_always_equal          // 两个实例是否等价
+```
+
+缺少 `rebind` 会导致 `std::list`、`std::map` 等节点容器无法使用 mystl 分配器（它们需要 `rebind` 为节点类型分配内存）。
+
+---
+
+## 十三、运行测试
 
 ```bash
 # 在项目根目录

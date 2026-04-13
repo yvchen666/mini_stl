@@ -927,3 +927,316 @@ phase01_allocator  ←──  phase02_iterator  ←──  phase03_containers
 ```
 
 所有容器的内存分配均通过 `Allocator<T>`（`phase01`）完成，迭代器标签和工具函数（`advance`、`distance`、`next`）来自 `phase02`。
+
+---
+
+## 九、复杂度分析表
+
+下表汇总全部 8 类容器的核心操作时间复杂度：
+
+| 容器 | 操作 | 时间复杂度 | 备注 |
+|------|------|-----------|------|
+| `vector` | `push_back`（均摊） | O(1) | 容量翻倍策略 |
+| `vector` | `push_back`（最坏） | O(n) | 触发扩容时搬移所有元素 |
+| `vector` | `insert` 中间 | O(n) | 需要向右搬移后半段 |
+| `vector` | `erase` 中间 | O(n) | 需要向左搬移后半段 |
+| `vector` | `operator[]` | O(1) | 裸指针偏移 |
+| `vector` | `find`（线性） | O(n) | 无序，只能顺序扫描 |
+| `list` | `push_front` | O(1) | 修改哨兵前驱/后继指针 |
+| `list` | `push_back` | O(1) | 同上 |
+| `list` | `insert`（已有迭代器） | O(1) | 只改 4 根指针 |
+| `list` | `erase`（已有迭代器） | O(1) | 只改 2 根指针 + 析构 |
+| `list` | `sort` | O(n log n) | 链表归并排序 |
+| `list` | `splice` | O(1) | 区间转移，不拷贝数据 |
+| `deque` | `push_front` | O(1) 均摊 | 偶发 map 扩容 |
+| `deque` | `push_back` | O(1) 均摊 | 偶发 map 扩容 |
+| `deque` | `operator[]` | O(1) | 整除计算 buffer 下标 |
+| `deque` | `insert` 中间 | O(n) | 需搬移前半段或后半段 |
+| `stack` / `queue` | `push` | O(1) 均摊 | 委托底层 `deque::push_back` |
+| `stack` / `queue` | `pop` | O(1) | 委托底层 `pop_back`/`pop_front` |
+| `stack` / `queue` | `top` / `front` | O(1) | 委托底层 `back`/`front` |
+| `heap` | `make_heap` | O(n) | 从最后一个非叶节点逐个 `sift_down` |
+| `heap` | `push_heap` | O(log n) | 追加 + `sift_up` |
+| `heap` | `pop_heap` | O(log n) | 交换堆顶与末尾 + `sift_down` |
+| `heap` | `sort_heap` | O(n log n) | 反复 `pop_heap` |
+| `heap` | `is_heap` | O(n) | 逐对检查父子关系 |
+| `rb_tree` / `map` / `set` | `insert` | O(log n) | 最多 O(log n) 次旋转修复 |
+| `rb_tree` / `map` / `set` | `erase` | O(log n) | 查找 + 最多 O(log n) 次旋转 |
+| `rb_tree` / `map` / `set` | `find` | O(log n) | 树高有界 2log(n+1) |
+| `rb_tree` / `map` / `set` | `lower_bound` | O(log n) | 与 `find` 同路径 |
+| `rb_tree` / `map` / `set` | `count` | O(log n + k) | k 为相等元素数 |
+| `hashtable` / `hash_map` | `insert`（均摊） | O(1) | 不触发 rehash |
+| `hashtable` / `hash_map` | `insert`（最坏，rehash） | O(n) | 重新分桶，复用旧节点 |
+| `hashtable` / `hash_map` | `find`（均摊） | O(1) | 负载因子低时链表极短 |
+| `hashtable` / `hash_map` | `find`（最坏） | O(n) | 哈希全碰撞退化为链表 |
+| `hashtable` / `hash_map` | `erase` | O(1) 均摊 | 定位桶 O(1) + 链表遍历 |
+
+---
+
+## 十、代码走读：rb_tree 插入修复（3 种 case 图解）
+
+### 前置说明
+
+新节点 `z` 初始着**红色**，不影响黑高，但可能与红色父节点冲突（违反性质 4：红节点的孩子必须是黑色）。`insert_fixup` 从 `z` 开始向上修复，直到冲突消除或到达根节点。
+
+**关键循环条件**：`z->parent != header_ && z->parent->color == Red`
+
+- 必须同时检查 `z->parent != header_`：因为 `header_->color == Red`，若只判断父节点颜色，当 `z` 已经是根节点的子节点且 `z->parent == header_` 时，循环会永远为 `true`，造成**无限循环**。
+- `z->parent != header_` 是提前终止条件，确保修复不越过根节点。
+
+---
+
+### Case 1：叔父节点为红色 → 重新着色，z 上移
+
+```
+        G(B)                G(R)  ← z 移到这里继续修复
+       / \                 / \
+     P(R) U(R)   →      P(B) U(B)
+     /                  /
+   z(R)               z(R)
+```
+
+操作：将父 P 和叔父 U 都变黑，祖父 G 变红，`z` 上移到 G 继续循环。
+效果：本层黑高不变（G 变红但其父到 G 的路径黑数不变），冲突可能向上传播。
+
+---
+
+### Case 2：叔父节点为黑色，z 是父的**右孩子** → 左旋 P，转化为 Case 3
+
+```
+      G(B)              G(B)
+     / \                / \
+   P(R) U(B)  →      z(R) U(B)
+     \                /
+     z(R)           P(R)
+                    ← 转为 Case 3
+```
+
+操作：以 P 为轴**左旋**，`z` 指针上移到原来的 P（旋转后 P 变成 z 的左孩子）。
+效果：树形从"右折"变成"左直"，进入 Case 3 处理。
+
+---
+
+### Case 3：叔父节点为黑色，z 是父的**左孩子** → 右旋 G + 重新着色
+
+```
+     G(B)             P(B)
+    / \               / \
+  P(R) U(B)  →     z(R) G(R)
+  /                       \
+z(R)                      U(B)
+```
+
+操作：P 变黑，G 变红，以 G 为轴**右旋**。
+效果：P 取代 G 的位置，P 为黑使得黑高守恒，冲突消除，循环终止。
+
+---
+
+### 关键代码回顾
+
+```cpp
+void insert_fixup(node_ptr z) {
+    // 两个前置条件缺一不可：
+    //   1. z->parent != header_  防止越过根节点（header_->color == Red）
+    //   2. z->parent->color == Red  父节点为红才存在冲突
+    while (z->parent != header_ && z->parent->color == RBColor::Red) {
+        node_ptr p = z->parent, g = p->parent;
+        if (p == g->left) {
+            node_ptr u = g->right;
+            if (u->color == RBColor::Red) {        // Case 1
+                p->color = u->color = RBColor::Black;
+                g->color = RBColor::Red;
+                z = g;                              // z 上移，继续修复
+            } else {
+                if (z == p->right) {               // Case 2 → 转化为 Case 3
+                    z = p; left_rotate(z);
+                    p = z->parent; g = p->parent;
+                }
+                p->color = RBColor::Black;          // Case 3
+                g->color = RBColor::Red;
+                right_rotate(g);
+            }
+        } else { /* 镜像：p == g->right，方向对调 */ }
+    }
+    root()->color = RBColor::Black;  // 最终确保根为黑
+}
+```
+
+---
+
+## 十一、实现难点 & 踩坑记录
+
+### 1. deque 跨 buffer 的迭代器算术：负偏移的 ceiling division
+
+`operator+=` 中，当偏移量 `offset` 为负时，不能直接用 `offset / BUF` 计算跨越的 buffer 数，因为 C++ 整数除法向零截断，`-1 / BUF == 0`，导致方向错误（应当向前跨一个 buffer，却判断为留在原 buffer）。
+
+正确做法是**向负无穷取整**（ceiling division for negative）：
+
+```cpp
+std::ptrdiff_t node_offset =
+    offset > 0
+    ? offset / std::ptrdiff_t(BUF)                          // 正偏移：直接整除
+    : -std::ptrdiff_t((-offset - 1) / BUF) - 1;            // 负偏移：先取绝对值再修正
+```
+
+以 `offset = -1, BUF = 8` 为例：`-(-(-1)-1)/8 - 1 = -(0/8) - 1 = -1`，正确跨到前一个 buffer。
+
+---
+
+### 2. heap ADL 歧义：`mystl::make_heap` 与 `std::make_heap` 冲突
+
+当 `priority_queue` 的底层容器是 `std::vector<T>` 时，调用 `mystl::make_heap(v.begin(), v.end(), comp)` 会触发 **ADL（Argument-Dependent Lookup）**：编译器在 `std::vector` 的迭代器所属命名空间（`std`）里找到 `std::make_heap`，与 `mystl::make_heap` 产生歧义，导致编译错误。
+
+解决方案有两种：
+
+```cpp
+// 方案 A：默认容器改用 mystl::vector（ADL 只找 mystl 命名空间）
+template <typename T,
+          typename Container = mystl::vector<T>,   // ← 改这里
+          typename Compare   = std::less<T>>
+class priority_queue { ... };
+
+// 方案 B：绕过堆算法接口，直接调用内部函数
+sift_up(c_.begin(), hole, Distance(0), std::move(value), comp_);
+```
+
+---
+
+### 3. rb_tree insert_fixup 无限循环：`header_->color == Red`
+
+`header_` 是一个**红色**哨兵节点（设计如此，方便 `end()` 的实现）。若循环条件只写 `z->parent->color == Red`，当 `z` 上移到根节点后，`z->parent == header_`，而 `header_->color == Red`，条件仍然为 `true`，循环永不终止。
+
+```cpp
+// 错误写法（无限循环）：
+while (z->parent->color == RBColor::Red) { ... }
+
+// 正确写法：
+while (z->parent != header_ && z->parent->color == RBColor::Red) { ... }
+```
+
+`z->parent != header_` 必须放在 `&&` 的**左侧**，利用短路求值，确保在越过根节点前提前退出。
+
+---
+
+### 4. cross-type iterator 比较：`iterator != const_iterator` 编译失败
+
+`rb_tree::iterator` 和 `rb_tree::const_iterator` 是同一模板 `rb_iterator<T, Ref, Ptr>` 的两个**不同实例化**，默认生成的 `operator==` 只接受完全相同的类型，导致 `it == cit` 编译失败。
+
+```cpp
+// 错误：两个不同类型，无法直接比较
+rb_tree::iterator it = ...;
+rb_tree::const_iterator cit = ...;
+if (it == cit) { ... }   // 编译错误
+```
+
+解决方案：在 `rb_iterator` 中加入**模板比较运算符**：
+
+```cpp
+template <typename T, typename Ref, typename Ptr>
+struct rb_iterator {
+    // 允许与任意 Ref2/Ptr2 实例化的 rb_iterator 比较
+    template <typename Ref2, typename Ptr2>
+    bool operator==(const rb_iterator<T, Ref2, Ptr2>& o) const {
+        return node_ == o.node_;
+    }
+    template <typename Ref2, typename Ptr2>
+    bool operator!=(const rb_iterator<T, Ref2, Ptr2>& o) const {
+        return node_ != o.node_;
+    }
+};
+```
+
+---
+
+### 5. `map::operator[]` 无法调用 `tree_.key_comp()`
+
+`rb_tree` 内部存储了比较器 `Compare`，但若未对外暴露 `key_comp()` 接口，`map::operator[]` 就无法从树对象获取比较器。
+
+```cpp
+// 编译错误（rb_tree 未提供 key_comp()）：
+if (tree_.key_comp()(k, it->first)) { ... }
+```
+
+解决方案：直接用 `Compare{}` 默认构造比较器（因为 `Compare` 是无状态函数对象）：
+
+```cpp
+T& operator[](const Key& k) {
+    auto it = tree_.lower_bound(k);
+    if (it == tree_.end() || Compare{}(k, it->first)) {  // ← 直接构造
+        it = tree_.insert_unique({k, T{}}).first;
+    }
+    return const_cast<T&>(it->second);
+}
+```
+
+---
+
+### 6. hashtable 迭代器跨桶：必须持有哈希表指针
+
+迭代器 `operator++` 在当前链表走完后需要找下一个非空桶，而桶数组 `buckets_` 属于 `hashtable` 对象，迭代器本身若不持有指向哈希表的指针，就无法访问 `buckets_`。
+
+```cpp
+template <typename HT>
+struct ht_iterator {
+    ht_node<typename HT::value_type>* cur_;  // 当前节点
+    const HT* ht_;                           // ← 必须持有，用于跨桶查找
+
+    self& operator++() {
+        auto old = cur_;
+        cur_ = cur_->next;
+        if (!cur_) {
+            std::size_t idx = ht_->bucket_index(old->value) + 1;
+            while (idx < ht_->buckets_.size() && !ht_->buckets_[idx])
+                ++idx;
+            cur_ = idx < ht_->buckets_.size() ? ht_->buckets_[idx] : nullptr;
+        }
+        return *this;
+    }
+};
+```
+
+注意迭代器持有的是 `const HT*`，防止通过迭代器意外修改哈希表结构。
+
+---
+
+## 十二、与 std 的对比和差异
+
+### 接口差异总览
+
+| mystl 容器 | std 对应 | 主要差异 |
+|-----------|---------|---------|
+| `mystl::vector` | `std::vector` | 缺少 `emplace_back`、`shrink_to_fit`、`assign`；无 `noexcept` 保证 |
+| `mystl::list` | `std::list` | `sort` 同为归并排序；缺少 `remove_if`、`unique`、双链表 `merge(list&&)` |
+| `mystl::deque` | `std::deque` | `BUF` 固定为 512 字节（std 按元素大小动态调整）；缺少 `shrink_to_fit` |
+| `mystl::map` / `mystl::set` | `std::map` / `std::set` | 缺少 C++17 `extract`、`merge`；无 hint insert（`insert(iterator, value)`）优化 |
+| `mystl::hash_map` | `std::unordered_map` | 命名不同；缺少 `max_load_factor`、`reserve`、`bucket()`；rehash 触发条件为 `size_ >= bucket_count`（而非 `load_factor > max_load_factor`） |
+| `mystl::priority_queue` | `std::priority_queue` | 接口基本相同；额外将底层 `sift_up`/`sift_down`/`make_heap` 等函数**直接暴露**在 `mystl` 命名空间 |
+
+### allocator 支持
+
+mystl 容器均**不支持自定义 allocator**：内存分配硬编码使用 `mystl::Allocator<T>`，模板参数 `Alloc` 形同虚设（部分容器甚至未将 `Alloc` 作为模板参数）。`std` 容器的 `allocator_traits` 机制（支持有状态 allocator、`propagate_on_container_swap` 等）在 mystl 中均未实现。
+
+### 异常安全
+
+mystl 容器普遍缺少 `noexcept` 标注和异常安全保证：
+
+```cpp
+// std::vector 移动构造保证 noexcept
+std::vector<T>(std::vector<T>&&) noexcept;
+
+// mystl::vector 移动构造未标注，强异常安全无法保证
+vector(vector&& other);   // 无 noexcept
+```
+
+在 `std::vector` 扩容时，若元素的移动构造函数不是 `noexcept`，标准库会退化为拷贝构造以保证强异常安全；mystl 无此机制，一律使用 `std::move`。
+
+### 迭代器失效规则
+
+mystl 与 std 的迭代器失效规则基本一致，但未在代码中强制保障：
+
+| 容器 | 触发失效的操作 |
+|------|--------------|
+| `vector` | 任何扩容操作（`push_back`/`insert` 触发 `grow`） |
+| `deque` | 两端以外的 `insert`/`erase`；map 扩容时所有迭代器 |
+| `list` / `hash_map` | 仅被删除元素的迭代器失效，其余不失效 |
+| `map` / `set` | 仅被删除元素的迭代器失效，其余不失效 |
