@@ -58,32 +58,32 @@ cmake --build build --target test_vector test_rb_tree test_map_set -j4
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        用户代码                                   │
+│                                                                                                                  用户代码                                                                                                                                                              │
 └───────────────────────────┬─────────────────────────────────────┘
-                            │ 使用
+                                                                                                  │ 使用
         ┌───────────────────┼───────────────────┐
-        ▼                   ▼                   ▼
+        ▼                                                                                     ▼                                                                                     ▼
 ┌──────────────┐  ┌──────────────────┐  ┌─────────────────┐
-│   算法        │  │    容器           │  │   函数对象       │
-│  algorithm   │  │  vector/list     │  │   plus/less     │
-│  sort/find   │  │  map/set         │  │  bind2nd/not1   │
-│  merge/copy  │  │  unordered_*     │  │                 │
+│   算法                                                  │  │    容器                                                                    │  │   函数对象                                                       │
+│  algorithm                                        │  │  vector/list                                                          │  │   plus/less                                                      │
+│  sort/find                                          │  │  map/set                                                              │  │  bind2nd/not1                                             │
+│  merge/copy                                    │  │  unordered_*                                                    │  │                                                                            │
 └──────┬───────┘  └────────┬─────────┘  └────────┬────────┘
-       │ 操作               │ 存放元素              │ 传入
-       │                   │                      │
-       ▼                   ▼                      │
-┌──────────────────────────────────┐              │
-│           迭代器                  │◄─────────────┘
-│  iterator_traits / tag dispatch  │
-│  reverse_iterator / distance     │
+                               │ 操作                                                                     │ 存放元素                                                                      │ 传入
+                               │                                                                               │                                                                                          │
+                               ▼                                                                               ▼                                                                                          │
+┌──────────────────────────────────┐                                                │
+│           迭代器                                                                                                                                │◄──────────┘
+│  iterator_traits / tag dispatch                                                                                            │
+│  reverse_iterator / distance                                                                                               │
 └──────────────────────────────────┘
        │ 访问内存
        ▼
 ┌──────────────────────────────────┐
-│           内存分配器               │
-│  MallocAlloc (>128B)             │
-│  PoolAlloc   (≤128B, freelist)   │
-│  construct / destroy             │
+│           内存分配器                                                                                                                      │
+│  MallocAlloc (>128B)                                                                                                             │
+│  PoolAlloc   (≤128B, freelist)                                                                                             │
+│  construct / destroy                                                                                                               │
 └──────────────────────────────────┘
 
   phase01         phase02           phase03        phase04   phase05
